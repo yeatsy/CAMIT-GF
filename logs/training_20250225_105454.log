@@ -11,3 +11,5 @@
   "patience": 7
 }
 2025-02-25 10:54:54,167 [INFO] - Using device: mps
+2025-02-25 13:33:53,848 [INFO] - Epoch 1/100 - Train Loss: 0.6612 - Val Loss: 0.6668
+2025-02-25 13:33:54,041 [INFO] - Saved best model checkpoint to checkpoints/20250225_105454/best_model.pth

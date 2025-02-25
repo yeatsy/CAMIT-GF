@@ -28,6 +28,9 @@ export DATASET_DIR=${TMP}/datasets/
 # Activate the relevant virtual environment:
 source /home/${STUDENT_ID}/miniconda3/bin/activate mlp
 
+# Install required packages if they're not already installed
+pip install --no-cache-dir scikit-learn tqdm pandas numpy
+
 # Create necessary directories
 mkdir -p logs
 mkdir -p checkpoints
