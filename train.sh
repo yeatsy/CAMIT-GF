@@ -57,10 +57,14 @@ echo "WORLD_SIZE: $WORLD_SIZE"
 # Launch distributed training using torchrun
 echo "Starting distributed training with 4 GPUs..."
 torchrun --nproc_per_node=4 --standalone train.py \
-    --batch_size 32 \
-    --grad_accum 8 \
+    --batch_size 128 \
+    --grad_accum 2 \
     --epochs 100 \
-    --lr 0.001
+    --lr 0.001 \
+    --d_model 32 \
+    --nhead 4 \
+    --num_encoder_layers 1 \
+    --num_main_layers 1
 
 # Print completion time
 echo "Finished at: $(date)" 
