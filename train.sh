@@ -11,6 +11,9 @@ export CUDNN_HOME=/opt/cuDNN-7.0/
 
 export STUDENT_ID=$(whoami)
 
+# Set PyTorch memory management settings
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:128
+
 export LD_LIBRARY_PATH=${CUDNN_HOME}/lib64:${CUDA_HOME}/lib64:$LD_LIBRARY_PATH
 export LIBRARY_PATH=${CUDNN_HOME}/lib64:$LIBRARY_PATH
 export CPATH=${CUDNN_HOME}/include:$CPATH
@@ -54,7 +57,8 @@ echo "WORLD_SIZE: $WORLD_SIZE"
 # Launch distributed training using torchrun
 echo "Starting distributed training with 4 GPUs..."
 torchrun --nproc_per_node=4 --standalone train.py \
-    --batch_size 256 \
+    --batch_size 32 \
+    --grad_accum 8 \
     --epochs 100 \
     --lr 0.001
 

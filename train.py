@@ -27,6 +27,7 @@ def cleanup_distributed():
 def parse_args():
     parser = argparse.ArgumentParser(description='CAMIT-GF Training')
     parser.add_argument('--batch_size', type=int, default=32, help='batch size for training')
+    parser.add_argument('--grad_accum', type=int, default=1, help='gradient accumulation steps')
     parser.add_argument('--epochs', type=int, default=100, help='number of epochs to train')
     parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
     parser.add_argument('--patience', type=int, default=7, help='patience for early stopping')
@@ -93,6 +94,9 @@ def train_model(model, train_loader, val_loader, device, config, local_rank):
     train_losses = []
     val_losses = []
     
+    # Enable gradient scaler for mixed precision training
+    scaler = torch.cuda.amp.GradScaler()
+    
     for epoch in range(config['epochs']):
         # Set epoch for distributed sampler
         train_loader.sampler.set_epoch(epoch)
@@ -100,10 +104,12 @@ def train_model(model, train_loader, val_loader, device, config, local_rank):
         # Training phase
         model.train()
         train_loss = torch.zeros(1).to(device)
+        optimizer.zero_grad()  # Zero gradients at start of epoch
+        
         train_pbar = tqdm(train_loader, desc=f'Epoch {epoch + 1}/{config["epochs"]} [Train]', 
                          disable=local_rank != 0)
         
-        for batch in train_pbar:
+        for batch_idx, batch in enumerate(train_pbar):
             # Move batch data to device
             glucose = batch['glucose'].to(device)
             carbs = batch['carbs'].to(device)
@@ -111,15 +117,31 @@ def train_model(model, train_loader, val_loader, device, config, local_rank):
             basal = batch['basal'].to(device)
             targets = batch['target'].to(device)
             
-            optimizer.zero_grad()
-            outputs = model(glucose, carbs, bolus, basal)
-            loss = criterion(outputs.squeeze(), targets)
-            loss.backward()
-            optimizer.step()
+            # Mixed precision forward pass
+            with torch.cuda.amp.autocast():
+                outputs = model(glucose, carbs, bolus, basal)
+                loss = criterion(outputs.squeeze(), targets)
+                # Normalize loss for gradient accumulation
+                loss = loss / config['grad_accum']
             
-            train_loss += loss.item()
+            # Scale loss and backward pass
+            scaler.scale(loss).backward()
+            
+            # Update weights if we've accumulated enough gradients
+            if (batch_idx + 1) % config['grad_accum'] == 0:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+            
+            train_loss += loss.item() * config['grad_accum']
             if local_rank == 0:
-                train_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+                train_pbar.set_postfix({'loss': f'{loss.item() * config["grad_accum"]:.4f}'})
+        
+        # Make sure to update if there are any remaining gradients
+        if (len(train_loader) % config['grad_accum']) != 0:
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
         
         # Average loss across processes
         dist.all_reduce(train_loss)
@@ -140,8 +162,10 @@ def train_model(model, train_loader, val_loader, device, config, local_rank):
                 basal = batch['basal'].to(device)
                 targets = batch['target'].to(device)
                 
-                outputs = model(glucose, carbs, bolus, basal)
-                loss = criterion(outputs.squeeze(), targets)
+                with torch.cuda.amp.autocast():
+                    outputs = model(glucose, carbs, bolus, basal)
+                    loss = criterion(outputs.squeeze(), targets)
+                
                 val_loss += loss.item()
                 if local_rank == 0:
                     val_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
@@ -163,6 +187,7 @@ def train_model(model, train_loader, val_loader, device, config, local_rank):
                     'epoch': epoch,
                     'model_state_dict': model.module.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
+                    'scaler_state_dict': scaler.state_dict(),  # Save scaler state
                     'train_loss': avg_train_loss,
                     'val_loss': avg_val_loss,
                     'config': config,
@@ -172,6 +197,9 @@ def train_model(model, train_loader, val_loader, device, config, local_rank):
             if early_stopping(avg_val_loss):
                 logging.info(f'Early stopping triggered after {epoch + 1} epochs')
                 break
+        
+        # Clear cache after each epoch
+        torch.cuda.empty_cache()
     
     return train_losses, val_losses, best_val_loss
 
@@ -190,6 +218,7 @@ if __name__ == "__main__":
         'num_encoder_layers': args.num_encoder_layers,
         'num_main_layers': args.num_main_layers,
         'batch_size': args.batch_size,
+        'grad_accum': args.grad_accum,
         'epochs': args.epochs,
         'learning_rate': args.lr,
         'patience': args.patience,
@@ -240,6 +269,12 @@ if __name__ == "__main__":
         num_encoder_layers=config['num_encoder_layers'],
         num_main_layers=config['num_main_layers']
     ).to(device)
+    
+    # Enable memory efficient attention
+    torch.backends.cuda.enable_mem_efficient_sdp = True
+    # Enable TF32 for better performance
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     
     # Train model
     try:
