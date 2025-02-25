@@ -54,7 +54,7 @@ echo "WORLD_SIZE: $WORLD_SIZE"
 # Launch distributed training using torchrun
 echo "Starting distributed training with 4 GPUs..."
 torchrun --nproc_per_node=4 --standalone train.py \
-    --batch_size 32 \
+    --batch_size 256 \
     --epochs 100 \
     --lr 0.001
 

@@ -221,7 +221,7 @@ if __name__ == "__main__":
         train_dataset,
         batch_size=config['batch_size'],
         sampler=train_sampler,
-        num_workers=4,  # Reduced from 6 to match available resources
+        num_workers=1,  # Reduced number of workers as per system suggestion
         pin_memory=True
     )
     
@@ -229,7 +229,7 @@ if __name__ == "__main__":
         val_dataset,
         batch_size=config['batch_size'],
         sampler=val_sampler,
-        num_workers=4,  # Reduced from 6 to match available resources
+        num_workers=1,  # Reduced number of workers as per system suggestion
         pin_memory=True
     )
     
