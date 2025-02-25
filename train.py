@@ -56,6 +56,7 @@ def train_model(model, train_loader, val_loader, device, config):
     """
     Training loop with validation and model checkpointing
     """
+    # Move model to device and set to train mode
     model = model.to(device)
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'])
@@ -78,7 +79,7 @@ def train_model(model, train_loader, val_loader, device, config):
         train_pbar = tqdm(train_loader, desc=f'Epoch {epoch + 1}/{config["epochs"]} [Train]')
         
         for batch in train_pbar:
-            # Move data to device
+            # Move all batch data to device
             glucose = batch['glucose'].to(device)
             carbs = batch['carbs'].to(device)
             bolus = batch['bolus'].to(device)
@@ -108,6 +109,7 @@ def train_model(model, train_loader, val_loader, device, config):
         
         with torch.no_grad():
             for batch in val_pbar:
+                # Move all batch data to device
                 glucose = batch['glucose'].to(device)
                 carbs = batch['carbs'].to(device)
                 bolus = batch['bolus'].to(device)
@@ -137,6 +139,7 @@ def train_model(model, train_loader, val_loader, device, config):
                 'optimizer_state_dict': optimizer.state_dict(),
                 'train_loss': avg_train_loss,
                 'val_loss': avg_val_loss,
+                'config': config,  # Save config for model reconstruction
             }, checkpoint_path)
             logging.info(f'Saved best model checkpoint to {checkpoint_path}')
         
@@ -146,6 +149,26 @@ def train_model(model, train_loader, val_loader, device, config):
             break
     
     return train_losses, val_losses, best_val_loss
+
+# Set up CUDA device
+def setup_device():
+    if torch.cuda.is_available():
+        # In SLURM environment, we should automatically get the correct GPU
+        device = torch.device("cuda")
+        # Print GPU info for logging
+        gpu_name = torch.cuda.get_device_name(0)
+        logging.info(f"Using GPU: {gpu_name}")
+        # Set default tensor type to cuda
+        torch.set_default_tensor_type('torch.cuda.FloatTensor')
+        return device
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+        logging.info("Using MPS device")
+        return device
+    else:
+        device = torch.device("cpu")
+        logging.info("Using CPU")
+        return device
 
 if __name__ == "__main__":
     # Configuration
@@ -168,16 +191,37 @@ if __name__ == "__main__":
     logging.info("Training configuration:")
     logging.info(json.dumps(config, indent=2))
     
-    # Set device
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
-    logging.info(f"Using device: {device}")
+    # Set device and enable CUDA optimizations
+    device = setup_device()
+    if device.type == 'cuda':
+        torch.backends.cudnn.benchmark = True
+        logging.info("CUDA optimization enabled")
     
     # Load and preprocess data
     train_dataset, val_dataset, test_dataset = preprocess_data(config['data_path'])
     
-    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=config['batch_size'], shuffle=False)
+    # Create data loaders with pin_memory for faster GPU transfer
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=config['batch_size'], 
+        shuffle=True,
+        pin_memory=True if device.type == 'cuda' else False,
+        num_workers=4 if device.type == 'cuda' else 0
+    )
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=config['batch_size'], 
+        shuffle=False,
+        pin_memory=True if device.type == 'cuda' else False,
+        num_workers=4 if device.type == 'cuda' else 0
+    )
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=config['batch_size'], 
+        shuffle=False,
+        pin_memory=True if device.type == 'cuda' else False,
+        num_workers=4 if device.type == 'cuda' else 0
+    )
     
     # Initialize model
     model = CAMIT_GF(

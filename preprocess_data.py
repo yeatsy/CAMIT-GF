@@ -85,7 +85,7 @@ class GlucoseDataset(Dataset):
 
 # Example usage
 if __name__ == "__main__":
-    file_path = 'glucose_data.csv'
+    file_path = 'full_patient_dataset.csv'
     train_dataset, val_dataset, test_dataset = preprocess_data(file_path)
     
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
