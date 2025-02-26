@@ -23,17 +23,18 @@ class PositionalEncoding(nn.Module):
 
 # Custom transformer layer with self-attention on glucose and cross-attention to carbs, bolus, and basal
 class MultiCrossAttentionTransformerLayer(nn.Module):
-    def __init__(self, d_model, nhead):
+    def __init__(self, d_model, nhead, dropout=0.1, layer_scale_init=1e-4):
         super().__init__()
         # Attention layers with batch_first=True for MPS compatibility
-        self.self_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True)
-        self.cross_attn_carbs = nn.MultiheadAttention(d_model, nhead, batch_first=True)
-        self.cross_attn_bolus = nn.MultiheadAttention(d_model, nhead, batch_first=True)
-        self.cross_attn_basal = nn.MultiheadAttention(d_model, nhead, batch_first=True)
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout)
+        self.cross_attn_carbs = nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout)
+        self.cross_attn_bolus = nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout)
+        self.cross_attn_basal = nn.MultiheadAttention(d_model, nhead, batch_first=True, dropout=dropout)
         # Feedforward network
         self.feed_forward = nn.Sequential(
             nn.Linear(d_model, 4 * d_model),
-            nn.ReLU(),
+            nn.GELU(),  # Replace ReLU with GELU
+            nn.Dropout(dropout),
             nn.Linear(4 * d_model, d_model)
         )
         # Layer normalization for each sublayer
@@ -42,33 +43,47 @@ class MultiCrossAttentionTransformerLayer(nn.Module):
         self.norm3 = nn.LayerNorm(d_model)
         self.norm4 = nn.LayerNorm(d_model)
         self.norm5 = nn.LayerNorm(d_model)
+        
+        # Layer scale parameters
+        self.ls1 = nn.Parameter(torch.ones(d_model) * layer_scale_init)
+        self.ls2 = nn.Parameter(torch.ones(d_model) * layer_scale_init)
+        self.ls3 = nn.Parameter(torch.ones(d_model) * layer_scale_init)
+        self.ls4 = nn.Parameter(torch.ones(d_model) * layer_scale_init)
+        self.ls5 = nn.Parameter(torch.ones(d_model) * layer_scale_init)
+        
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, glucose_hidden, carbs_hidden, bolus_hidden, basal_hidden):
-        # Self-attention on glucose sequence
+        # Self-attention on glucose sequence with layer scale
         attn_output, _ = self.self_attn(glucose_hidden, glucose_hidden, glucose_hidden)
-        glucose_hidden = self.norm1(glucose_hidden + attn_output)
+        glucose_hidden = glucose_hidden + self.dropout(self.ls1.unsqueeze(0).unsqueeze(0) * attn_output)
+        glucose_hidden = self.norm1(glucose_hidden)
 
         # Cross-attention to carbs sequence
         attn_output, _ = self.cross_attn_carbs(glucose_hidden, carbs_hidden, carbs_hidden)
-        glucose_hidden = self.norm2(glucose_hidden + attn_output)
+        glucose_hidden = glucose_hidden + self.dropout(self.ls2.unsqueeze(0).unsqueeze(0) * attn_output)
+        glucose_hidden = self.norm2(glucose_hidden)
 
         # Cross-attention to bolus sequence
         attn_output, _ = self.cross_attn_bolus(glucose_hidden, bolus_hidden, bolus_hidden)
-        glucose_hidden = self.norm3(glucose_hidden + attn_output)
+        glucose_hidden = glucose_hidden + self.dropout(self.ls3.unsqueeze(0).unsqueeze(0) * attn_output)
+        glucose_hidden = self.norm3(glucose_hidden)
 
         # Cross-attention to basal sequence
         attn_output, _ = self.cross_attn_basal(glucose_hidden, basal_hidden, basal_hidden)
-        glucose_hidden = self.norm4(glucose_hidden + attn_output)
+        glucose_hidden = glucose_hidden + self.dropout(self.ls4.unsqueeze(0).unsqueeze(0) * attn_output)
+        glucose_hidden = self.norm4(glucose_hidden)
 
         # Feedforward network
         ff_output = self.feed_forward(glucose_hidden)
-        glucose_hidden = self.norm5(glucose_hidden + ff_output)
+        glucose_hidden = glucose_hidden + self.dropout(self.ls5.unsqueeze(0).unsqueeze(0) * ff_output)
+        glucose_hidden = self.norm5(glucose_hidden)
 
         return glucose_hidden
 
 # Main CAMIT-GF model class
 class CAMIT_GF(nn.Module):
-    def __init__(self, d_model, nhead, num_encoder_layers, num_main_layers):
+    def __init__(self, d_model, nhead, num_encoder_layers, num_main_layers, dropout=0.1):
         super().__init__()
         # Input projection layers for each input type
         self.input_proj_G = nn.Linear(1, d_model)  # Glucose
@@ -96,7 +111,7 @@ class CAMIT_GF(nn.Module):
         )
         # Main transformer with multiple custom layers
         self.main_transformer = nn.ModuleList([
-            MultiCrossAttentionTransformerLayer(d_model, nhead) for _ in range(num_main_layers)
+            MultiCrossAttentionTransformerLayer(d_model, nhead, dropout) for _ in range(num_main_layers)
         ])
         # Prediction head to output a single glucose value
         self.prediction_head = nn.Linear(d_model, 1)
@@ -130,42 +145,302 @@ class CAMIT_GF(nn.Module):
         return prediction
 
 if __name__ == "__main__":
-    # Check for MPS availability for Apple Silicon
-    if torch.backends.mps.is_available():
+    # Set up CUDA and optimization flags
+    torch.backends.cudnn.benchmark = True  # Enable cudnn autotuner
+    torch.backends.cuda.matmul.allow_tf32 = True  # Enable TF32 on Ampere GPUs
+    torch.backends.cudnn.allow_tf32 = True
+    
+    # Check for GPU availability
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+    elif torch.backends.mps.is_available():
         device = torch.device("mps")
+        print("Using MPS")
     else:
         device = torch.device("cpu")
-    print(f"Using device: {device}")
+        print("Using CPU")
 
-    # Hyperparameters
-    batch_size = 32
-    seq_len = 288  # 24 hours at 5-min intervals
-    d_model = 64
-    nhead = 8
-    num_encoder_layers = 2
-    num_main_layers = 2
+    # Load and preprocess actual data
+    from preprocess_data import preprocess_data
+    train_dataset, val_dataset, test_dataset = preprocess_data('full_patient_dataset.csv')
+    
+    # Optimize batch size for GPU memory
+    # Assuming 24GB GPU memory (e.g., RTX 3090)
+    batch_size = 512  # Increased for GPU
+    
+    # Create data loaders with GPU optimizations
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, 
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=8,  # Increased for faster data loading
+        pin_memory=True,
+        persistent_workers=True,  # Keep workers alive between epochs
+        prefetch_factor=2  # Prefetch 2 batches per worker
+    )
+    
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset,
+        batch_size=batch_size * 2,  # Can use larger batch size for validation
+        shuffle=False,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2
+    )
 
-    # Initialize model and move to device
-    model = CAMIT_GF(d_model, nhead, num_encoder_layers, num_main_layers).to(device)
+    # Enable automatic mixed precision for faster training
+    scaler = torch.cuda.amp.GradScaler()
 
-    # Generate dummy data for demonstration
-    glucose = torch.randn(batch_size, seq_len, 1).to(device)
-    carbs = torch.randn(batch_size, seq_len, 1).to(device)
-    bolus = torch.randn(batch_size, seq_len, 1).to(device)
-    basal = torch.randn(batch_size, seq_len, 1).to(device)
-    target = torch.randn(batch_size, 1).to(device)
+    # Hyperparameter search space
+    param_grid = {
+        'd_model': [32, 64, 128],
+        'nhead': [4, 8],
+        'num_encoder_layers': [1, 2, 3],
+        'num_main_layers': [1, 2, 3],
+        'dropout': [0.1, 0.2],
+        'learning_rate': [0.0001, 0.001],
+        'weight_decay': [0.01, 0.001]
+    }
 
-    # Define loss function and optimizer
+    # Function to train model for a few epochs to evaluate hyperparameters
+    def evaluate_hyperparameters(params, num_search_epochs=5):
+        model = CAMIT_GF(
+            d_model=params['d_model'],
+            nhead=params['nhead'],
+            num_encoder_layers=params['num_encoder_layers'],
+            num_main_layers=params['num_main_layers'],
+            dropout=params['dropout']
+        ).to(device)
+        
+        # Enable parallel processing if multiple GPUs available
+        if torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs!")
+            model = nn.DataParallel(model)
+        
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=params['learning_rate'],
+            weight_decay=params['weight_decay']
+        )
+        
+        loss_fn = nn.MSELoss()
+        best_val_loss = float('inf')
+        
+        for epoch in range(num_search_epochs):
+            # Training phase
+            model.train()
+            train_loss = 0.0
+            for batch in train_loader:
+                # Move batch to device
+                glucose = batch['glucose'].to(device, non_blocking=True)
+                carbs = batch['carbs'].to(device, non_blocking=True)
+                bolus = batch['bolus'].to(device, non_blocking=True)
+                basal = batch['basal'].to(device, non_blocking=True)
+                targets = batch['target'].to(device, non_blocking=True)
+                
+                optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
+                
+                # Use automatic mixed precision
+                with torch.cuda.amp.autocast():
+                    outputs = model(glucose, carbs, bolus, basal)
+                    loss = loss_fn(outputs.squeeze(), targets)
+                
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                
+                train_loss += loss.item()
+            
+            # Validation phase
+            model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for batch in val_loader:
+                    glucose = batch['glucose'].to(device, non_blocking=True)
+                    carbs = batch['carbs'].to(device, non_blocking=True)
+                    bolus = batch['bolus'].to(device, non_blocking=True)
+                    basal = batch['basal'].to(device, non_blocking=True)
+                    targets = batch['target'].to(device, non_blocking=True)
+                    
+                    with torch.cuda.amp.autocast():
+                        outputs = model(glucose, carbs, bolus, basal)
+                        loss = loss_fn(outputs.squeeze(), targets)
+                    val_loss += loss.item()
+            
+            val_loss = val_loss / len(val_loader)
+            best_val_loss = min(best_val_loss, val_loss)
+            
+            print(f"Epoch {epoch+1}/{num_search_epochs} - Val Loss: {val_loss:.4f}")
+            
+            # Clear cache after each epoch
+            torch.cuda.empty_cache()
+        
+        return best_val_loss
+
+    # Rest of the hyperparameter search code...
+    print("Starting hyperparameter search...")
+    best_params = None
+    best_val_loss = float('inf')
+    
+    from itertools import product
+    param_combinations = [dict(zip(param_grid.keys(), v)) for v in product(*param_grid.values())]
+    total_combinations = len(param_combinations)
+    
+    print(f"Testing {total_combinations} hyperparameter combinations...")
+    
+    for i, params in enumerate(param_combinations, 1):
+        print(f"\nTesting combination {i}/{total_combinations}")
+        print("Parameters:", params)
+        
+        val_loss = evaluate_hyperparameters(params)
+        print(f"Validation loss: {val_loss:.4f}")
+        
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_params = params
+            print("New best configuration found!")
+            
+            with open('best_hyperparameters.json', 'w') as f:
+                import json
+                json.dump(best_params, f, indent=2)
+
+    print("\nHyperparameter search completed.")
+    print("Best parameters:", best_params)
+    print(f"Best validation loss: {best_val_loss:.4f}")
+
+    # Final training with best parameters
+    print("\nStarting final training with best parameters...")
+    
+    # Initialize model with best parameters
+    model = CAMIT_GF(
+        d_model=best_params['d_model'],
+        nhead=best_params['nhead'],
+        num_encoder_layers=best_params['num_encoder_layers'],
+        num_main_layers=best_params['num_main_layers'],
+        dropout=best_params['dropout']
+    ).to(device)
+
+    # Enable multi-GPU training
+    if torch.cuda.device_count() > 1:
+        model = nn.DataParallel(model)
+
+    # Training setup
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=best_params['learning_rate'],
+        weight_decay=best_params['weight_decay']
+    )
+    
     loss_fn = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    scaler = torch.cuda.amp.GradScaler()
+    
+    # Learning rate scheduler
+    steps_per_epoch = len(train_loader)
+    total_steps = 50 * steps_per_epoch  # 50 epochs
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=best_params['learning_rate'],
+        total_steps=total_steps,
+        pct_start=0.1,
+        anneal_strategy='cos',
+        cycle_momentum=True,
+        div_factor=25.0,
+        final_div_factor=1000.0
+    )
 
-    # Example training step
-    model.train()
-    optimizer.zero_grad()
-    prediction = model(glucose, carbs, bolus, basal)
-    loss = loss_fn(prediction, target)
-    loss.backward()
-    optimizer.step()
+    # Training tracking
+    best_val_loss = float('inf')
+    train_losses = []
+    val_losses = []
 
-    print("Training step completed.")
-    print(f"Loss: {loss.item():.4f}")
+    # Final training loop with optimizations
+    for epoch in range(50):
+        # Training phase
+        model.train()
+        train_loss = 0.0
+        for batch in train_loader:
+            # Move batch to device
+            glucose = batch['glucose'].to(device, non_blocking=True)
+            carbs = batch['carbs'].to(device, non_blocking=True)
+            bolus = batch['bolus'].to(device, non_blocking=True)
+            basal = batch['basal'].to(device, non_blocking=True)
+            targets = batch['target'].to(device, non_blocking=True)
+            
+            optimizer.zero_grad(set_to_none=True)
+            
+            # Use automatic mixed precision
+            with torch.cuda.amp.autocast():
+                outputs = model(glucose, carbs, bolus, basal)
+                loss = loss_fn(outputs.squeeze(), targets)
+            
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            
+            scheduler.step()
+            train_loss += loss.item()
+        
+        train_loss = train_loss / len(train_loader)
+        
+        # Validation phase
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for batch in val_loader:
+                glucose = batch['glucose'].to(device, non_blocking=True)
+                carbs = batch['carbs'].to(device, non_blocking=True)
+                bolus = batch['bolus'].to(device, non_blocking=True)
+                basal = batch['basal'].to(device, non_blocking=True)
+                targets = batch['target'].to(device, non_blocking=True)
+                
+                with torch.cuda.amp.autocast():
+                    outputs = model(glucose, carbs, bolus, basal)
+                    loss = loss_fn(outputs.squeeze(), targets)
+                val_loss += loss.item()
+        
+        val_loss = val_loss / len(val_loader)
+        
+        # Store losses
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        
+        # Save best model
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
+                'train_loss': train_loss,
+                'val_loss': val_loss,
+                'hyperparameters': best_params
+            }, 'best_model_checkpoint.pth')
+        
+        # Print progress
+        print(f"Epoch {epoch+1}/50")
+        print(f"Train Loss: {train_loss:.4f}")
+        print(f"Val Loss: {val_loss:.4f}")
+        print(f"Learning Rate: {scheduler.get_last_lr()[0]:.6f}")
+        print("-" * 50)
+        
+        # Clear cache after each epoch
+        torch.cuda.empty_cache()
+
+    print("Training completed.")
+    print(f"Best validation loss: {best_val_loss:.4f}")
+
+    # Save training history
+    history = {
+        'train_losses': train_losses,
+        'val_losses': val_losses,
+        'best_val_loss': best_val_loss,
+        'best_parameters': best_params
+    }
+    with open('training_history.json', 'w') as f:
+        json.dump(history, f, indent=2)
