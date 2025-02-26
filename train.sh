@@ -3,8 +3,8 @@
 #SBATCH -n 1         # tasks requested
 #SBATCH --partition=Teach-Standard
 #SBATCH --gres=gpu:4
-#SBATCH --mem=32000  # memory in Mb - increased for larger batch sizes
-#SBATCH --time=0-72:00:00  # increased time for hyperparameter search
+#SBATCH --mem=32000  # memory in Mb
+#SBATCH --time=0-72:00:00
 
 export CUDA_HOME=/opt/cuda-9.0.176.1/
 export CUDNN_HOME=/opt/cuDNN-7.0/
@@ -20,6 +20,12 @@ export CUDA_MEMORY_DEBUG=1
 # Set environment variables for better GPU utilization
 export NCCL_DEBUG=INFO
 export NCCL_SOCKET_IFNAME=^docker0,lo
+
+# Make all GPUs visible
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
+# Set memory growth to be gradual
+export CUDA_LAUNCH_BLOCKING=1
 
 export LD_LIBRARY_PATH=${CUDNN_HOME}/lib64:${CUDA_HOME}/lib64:$LD_LIBRARY_PATH
 export LIBRARY_PATH=${CUDNN_HOME}/lib64:$LIBRARY_PATH
@@ -45,7 +51,7 @@ export LOG_DIR=${TMP}/logs/
 source /home/${STUDENT_ID}/miniconda3/bin/activate mlp
 
 # Install required packages
-pip install --no-cache-dir torch torchvision torchaudio scikit-learn tqdm pandas numpy
+pip install --no-cache-dir torch==2.0.1 torchvision torchaudio scikit-learn tqdm pandas numpy
 
 # Print job information
 echo "Job ID: $SLURM_JOB_ID"
@@ -68,10 +74,12 @@ echo "Starting hyperparameter search and training..."
 echo "Logs will be saved to: ${LOG_DIR}/${TIMESTAMP}"
 echo "Checkpoints will be saved to: ${CHECKPOINT_DIR}/${TIMESTAMP}"
 
-# Run the training script
+# Run the training script with standard batch size
 python model.py \
     --checkpoint_dir ${CHECKPOINT_DIR}/${TIMESTAMP} \
     --log_dir ${LOG_DIR}/${TIMESTAMP} \
+    --batch_size 256 \
+    --mixed_precision true \
     2>&1 | tee ${LOG_DIR}/${TIMESTAMP}/training.log
 
 # Copy results to permanent storage

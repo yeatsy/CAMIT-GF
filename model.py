@@ -1,6 +1,9 @@
 import torch
 import torch.nn as nn
 import math
+import argparse
+import os
+import json
 
 # Positional Encoding module for transformer inputs
 class PositionalEncoding(nn.Module):
@@ -145,18 +148,25 @@ class CAMIT_GF(nn.Module):
         return prediction
 
 if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='CAMIT-GF Training')
+    parser.add_argument('--checkpoint_dir', type=str, required=True, help='Directory to save checkpoints')
+    parser.add_argument('--log_dir', type=str, required=True, help='Directory to save logs')
+    parser.add_argument('--batch_size', type=int, default=256, help='Batch size for training')
+    parser.add_argument('--mixed_precision', type=bool, default=True, help='Use mixed precision training')
+    args = parser.parse_args()
+
     # Set up CUDA and optimization flags
-    torch.backends.cudnn.benchmark = True  # Enable cudnn autotuner
-    torch.backends.cuda.matmul.allow_tf32 = True  # Enable TF32 on Ampere GPUs
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     
-    # Check for GPU availability
+    # Check GPU configuration
     if torch.cuda.is_available():
         device = torch.device("cuda")
-        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-        print("Using MPS")
+        print(f"Found {torch.cuda.device_count()} GPUs")
+        for i in range(torch.cuda.device_count()):
+            print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
     else:
         device = torch.device("cpu")
         print("Using CPU")
@@ -165,24 +175,20 @@ if __name__ == "__main__":
     from preprocess_data import preprocess_data
     train_dataset, val_dataset, test_dataset = preprocess_data('full_patient_dataset.csv')
     
-    # Optimize batch size for GPU memory
-    # Assuming 24GB GPU memory (e.g., RTX 3090)
-    batch_size = 512  # Increased for GPU
-    
     # Create data loaders with GPU optimizations
     train_loader = torch.utils.data.DataLoader(
         train_dataset, 
-        batch_size=batch_size,
+        batch_size=args.batch_size,
         shuffle=True,
-        num_workers=8,  # Increased for faster data loading
+        num_workers=8,
         pin_memory=True,
-        persistent_workers=True,  # Keep workers alive between epochs
-        prefetch_factor=2  # Prefetch 2 batches per worker
+        persistent_workers=True,
+        prefetch_factor=2
     )
     
     val_loader = torch.utils.data.DataLoader(
         val_dataset,
-        batch_size=batch_size * 2,  # Can use larger batch size for validation
+        batch_size=args.batch_size * 2,
         shuffle=False,
         num_workers=8,
         pin_memory=True,
@@ -190,8 +196,8 @@ if __name__ == "__main__":
         prefetch_factor=2
     )
 
-    # Enable automatic mixed precision for faster training
-    scaler = torch.cuda.amp.GradScaler()
+    # Enable automatic mixed precision if requested
+    scaler = torch.cuda.amp.GradScaler(enabled=args.mixed_precision)
 
     # Hyperparameter search space
     param_grid = {
@@ -214,7 +220,6 @@ if __name__ == "__main__":
             dropout=params['dropout']
         ).to(device)
         
-        # Enable parallel processing if multiple GPUs available
         if torch.cuda.device_count() > 1:
             print(f"Using {torch.cuda.device_count()} GPUs!")
             model = nn.DataParallel(model)
@@ -302,8 +307,8 @@ if __name__ == "__main__":
             best_params = params
             print("New best configuration found!")
             
-            with open('best_hyperparameters.json', 'w') as f:
-                import json
+            # Save best parameters so far
+            with open(os.path.join(args.checkpoint_dir, 'best_hyperparameters.json'), 'w') as f:
                 json.dump(best_params, f, indent=2)
 
     print("\nHyperparameter search completed.")
@@ -322,7 +327,7 @@ if __name__ == "__main__":
         dropout=best_params['dropout']
     ).to(device)
 
-    # Enable multi-GPU training
+    # Enable multi-GPU training if available
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
 
@@ -411,6 +416,7 @@ if __name__ == "__main__":
         # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            checkpoint_path = os.path.join(args.checkpoint_dir, 'best_model_checkpoint.pth')
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict(),
@@ -420,7 +426,7 @@ if __name__ == "__main__":
                 'train_loss': train_loss,
                 'val_loss': val_loss,
                 'hyperparameters': best_params
-            }, 'best_model_checkpoint.pth')
+            }, checkpoint_path)
         
         # Print progress
         print(f"Epoch {epoch+1}/50")
@@ -442,5 +448,5 @@ if __name__ == "__main__":
         'best_val_loss': best_val_loss,
         'best_parameters': best_params
     }
-    with open('training_history.json', 'w') as f:
+    with open(os.path.join(args.checkpoint_dir, 'training_history.json'), 'w') as f:
         json.dump(history, f, indent=2)
