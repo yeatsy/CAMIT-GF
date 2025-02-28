@@ -363,7 +363,7 @@ if __name__ == "__main__":
     # Final training loop with optimizations
     for epoch in range(50):
         # Training phase
-        model.train()
+    model.train()
         train_loss = 0.0
         for batch in train_loader:
             # Move batch to device
