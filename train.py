@@ -129,7 +129,16 @@ def main():
         train_sampler.set_epoch(epoch)  # Important for proper shuffling
         
         train_loss = torch.zeros(1).to(device)
-        for batch in train_loader:
+        
+        # Create progress bars only on rank 0
+        if local_rank == 0:
+            train_pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{args.epochs} [Train]', 
+                            leave=False, dynamic_ncols=True)
+            train_iter = train_pbar
+        else:
+            train_iter = train_loader
+            
+        for batch in train_iter:
             # Move data to device
             glucose = batch['glucose'].to(device, non_blocking=True)
             carbs = batch['carbs'].to(device, non_blocking=True)
@@ -150,6 +159,10 @@ def main():
             scaler.update()
             
             train_loss += loss.detach()
+            
+            # Update progress bar on rank 0
+            if local_rank == 0:
+                train_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
         
         # Average loss across processes
         dist.all_reduce(train_loss)
@@ -158,8 +171,17 @@ def main():
         # Validation
         model.eval()
         val_loss = torch.zeros(1).to(device)
+        
+        # Create validation progress bar only on rank 0
+        if local_rank == 0:
+            val_pbar = tqdm(val_loader, desc=f'Epoch {epoch+1}/{args.epochs} [Val]', 
+                          leave=False, dynamic_ncols=True)
+            val_iter = val_pbar
+        else:
+            val_iter = val_loader
+            
         with torch.no_grad():
-            for batch in val_loader:
+            for batch in val_iter:
                 glucose = batch['glucose'].to(device, non_blocking=True)
                 carbs = batch['carbs'].to(device, non_blocking=True)
                 bolus = batch['bolus'].to(device, non_blocking=True)
@@ -170,6 +192,10 @@ def main():
                     outputs = model(glucose, carbs, bolus, basal)
                     loss = criterion(outputs.squeeze(), targets)
                 val_loss += loss.detach()
+                
+                # Update progress bar on rank 0
+                if local_rank == 0:
+                    val_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
         
         # Average validation loss across processes
         dist.all_reduce(val_loss)
@@ -177,6 +203,10 @@ def main():
         
         # Print progress on main process
         if local_rank == 0:
+            # Close progress bars
+            train_pbar.close()
+            val_pbar.close()
+            
             print(f"Epoch {epoch+1}/{args.epochs}")
             print(f"Train Loss: {train_loss:.4f}")
             print(f"Val Loss: {val_loss:.4f}")

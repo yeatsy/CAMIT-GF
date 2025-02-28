@@ -30,6 +30,11 @@ mkdir -p ${TMP}/logs/
 export CHECKPOINT_DIR=${TMP}/checkpoints/
 export LOG_DIR=${TMP}/logs/
 
+# Set environment variables for tqdm
+export PYTHONUNBUFFERED=1
+export TQDM_DISABLE=0
+export TQDM_MININTERVAL=1.0
+
 # Activate the relevant virtual environment:
 source /home/${STUDENT_ID}/miniconda3/bin/activate mlp
 
